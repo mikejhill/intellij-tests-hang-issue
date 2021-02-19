@@ -1,0 +1,173 @@
+import groovy.lang.Closure
+import org.gradle.api.internal.AbstractTask
+import org.gradle.api.internal.tasks.InputChangesAwareTaskAction
+import java.util.*
+
+plugins {
+    java
+}
+
+/* Reproduction Configuration */
+/*
+ * See https://youtrack.jetbrains.com/issue/IDEA-260282. IntelliJ is hanging indefinitely when running tests in some
+ * cases. This appears to happen in particular when running a test task for which no qualifying tests are found. All
+ * issue reproduction below is done by applying filters (Test#filter) to the test task such that no tests are found.
+ * The time at which the filter is applied is relevant, as IntelliJ's ijtestinit.gradle init file will overwrite filters
+ * on the task-graph-ready event.
+ *
+ * Change caseNum below to run each case individually.
+ */
+val caseNum = if (project.extra.has("caseNum")) Integer.parseInt(project.extra["caseNum"]?.toString()) else 1
+/* End Reproduction Configuration */
+
+/* Setup */
+group = "org.example"
+version = "1.0-SNAPSHOT"
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    testImplementation("org.junit.jupiter:junit-jupiter-api:5.7.0")
+    testImplementation("org.junit.jupiter:junit-jupiter-engine:5.7.0")
+    testImplementation("org.junit.jupiter:junit-jupiter-params:5.7.0")
+    testImplementation("org.junit.platform:junit-platform-engine:1.7.0")
+    testImplementation("org.junit.platform:junit-platform-launcher:1.7.0")
+}
+
+object Constants {
+    const val HANGING_TEST_TASK_NAME = "hangingTest"
+    const val MATCHED_TEST_PATTERN = "SampleTests"
+    const val UNMATCHED_TEST_PATTERN = "NoMatchingTests"
+}
+
+project.tasks.withType(Test::class) {
+    useJUnitPlatform { includeEngines("junit-jupiter", "junit-vintage") }
+    filter {
+        isFailOnNoMatchingTests = false
+    }
+}
+
+project.tasks.register(Constants.HANGING_TEST_TASK_NAME, TestProxy::class) { }
+project.tasks.named("test", Test::class) {
+    dependsOn(Constants.HANGING_TEST_TASK_NAME)
+}
+
+open class TestProxy : Test() {
+
+    override fun getTaskActions(): MutableList<InputChangesAwareTaskAction> {
+        var parentActions = super.getTaskActions()
+        if (parentActions !is TaskActionListProxy) {
+            println("Replacing actions list for [${this.name}] with proxy")
+            parentActions = TaskActionListProxy()
+            val actionsField = AbstractTask::class.java.getDeclaredField("actions")
+            actionsField.isAccessible = true
+            actionsField.set(this, parentActions)
+            doFirst("Print actions list") {
+                println("Have actions list for [${this.name}] (attach debugger for more info): ${actions.joinToString("\n- ", "\n- ")}")
+            }
+        }
+        return parentActions
+    }
+
+    override fun doFirst(action: Action<in Task>): Task {
+        println("Registering doFirst action for [${this.name}]: $action")
+        return super.doFirst(action)
+    }
+
+    override fun doFirst(actionName: String, action: Action<in Task>): Task {
+        println("Registering doFirst action for [${this.name}] with action name [$actionName]: $action")
+        return super.doFirst(actionName, action)
+    }
+
+    override fun doFirst(action: Closure<*>): Task {
+        println("Registering doFirst action for [${this.name}]: $action")
+        return super.doFirst(action)
+    }
+
+    inner class TaskActionListProxy : ArrayList<InputChangesAwareTaskAction>() {
+        override fun add(index: Int, element: InputChangesAwareTaskAction) {
+            // Reserve zero-index for first-added element
+            super.add(if (size > 0 && index == 0) index + 1 else index, element)
+        }
+    }
+}
+/* End Setup */
+
+/* Issue Reproduction */
+println("Execute with case number [${caseNum}]...")
+when (caseNum) {
+    // Success
+    1 -> {
+        project.tasks.named(Constants.HANGING_TEST_TASK_NAME, Test::class) {
+            println("Running matched on-configuration filter on [${this.name}]")
+            filter {
+                setIncludePatterns(Constants.MATCHED_TEST_PATTERN)
+            }
+        }
+    }
+
+    // Success
+    2 -> {
+        project.tasks.named(Constants.HANGING_TEST_TASK_NAME, Test::class) {
+            doFirst {
+                println("Running matched on-configuration doFirst filter on [${this.name}]")
+                filter {
+                    setIncludePatterns(Constants.MATCHED_TEST_PATTERN)
+                }
+            }
+        }
+    }
+
+    // Success
+    3 -> {
+        project.tasks.named(Constants.HANGING_TEST_TASK_NAME, Test::class) {
+            println("Running unmatched on-configuration filter on [${this.name}]")
+            filter {
+                setIncludePatterns(Constants.UNMATCHED_TEST_PATTERN)
+            }
+        }
+    }
+
+    // Failure
+    4 -> {
+        project.tasks.named(Constants.HANGING_TEST_TASK_NAME, Test::class) {
+            doFirst {
+                println("Running unmatched on-configuration doFirst filter on [${this.name}]")
+                filter {
+                    setIncludePatterns(Constants.UNMATCHED_TEST_PATTERN)
+                }
+            }
+        }
+    }
+
+    // Success
+    5 -> {
+        gradle.taskGraph.whenReady {
+            project.tasks.named(Constants.HANGING_TEST_TASK_NAME, Test::class) {
+                doFirst {
+                    println("Running matched task.Graph#whenReady doFirst filter on [${this.name}]")
+                    filter {
+                        setIncludePatterns(Constants.MATCHED_TEST_PATTERN)
+                    }
+                }
+            }
+        }
+    }
+
+    // Failure
+    6 -> {
+        gradle.taskGraph.whenReady {
+            project.tasks.named(Constants.HANGING_TEST_TASK_NAME, Test::class) {
+                doFirst {
+                    println("Running unmatched task.Graph#whenReady doFirst filter on [${this.name}]")
+                    filter {
+                        setIncludePatterns(Constants.UNMATCHED_TEST_PATTERN)
+                    }
+                }
+            }
+        }
+    }
+}
+/* End Issue Reproduction */
